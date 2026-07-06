@@ -76,3 +76,26 @@ def test_flange_outer_diameter_not_overwritten_by_late_ambiguous_diameter() -> N
     assert parsed["dimensions"]["thickness"] == 10.0
     assert any("8 mm" in warning and "ambiguo" in warning for warning in parsed["warnings"])
     assert validate_geometry(parsed)["valid"] is True
+
+
+def test_flange_typo_flage_uses_circular_flange_not_default_plate() -> None:
+    parsed = parse_prompt(
+        "flage redondo com 100mm diametro 8 furos num raio de 30mm "
+        "com diametro de 12mm espessura de 12mm"
+    )
+    assert parsed["part_type"] == "flange"
+    assert parsed["dimensions"]["outer_diameter"] == 100.0
+    assert parsed["dimensions"]["diameter"] == 100.0
+    assert parsed["dimensions"]["hole_count"] == 8
+    assert parsed["dimensions"]["hole_diameter"] == 12.0
+    assert parsed["dimensions"]["bolt_circle_radius"] == 30.0
+    assert parsed["dimensions"]["bolt_circle_diameter"] == 60.0
+    assert parsed["dimensions"]["thickness"] == 12.0
+    assert "length" not in parsed["dimensions"]
+    assert "width" not in parsed["dimensions"]
+    assert "Tipo nao identificado" not in "\n".join(parsed["assumptions"])
+    holes = parsed.feature("bolt_circle_holes")
+    assert holes is not None
+    assert holes.params["placement"] == "bolt_circle"
+    assert holes.params["radius"] == 30.0
+    assert validate_geometry(parsed)["valid"] is True

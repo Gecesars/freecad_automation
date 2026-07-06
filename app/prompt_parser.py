@@ -112,6 +112,7 @@ def _extract_named_dimension(text: str, aliases: tuple[str, ...]) -> float | Non
 
 
 HOLE_TERMS = "furos|furo|furus|furu|holes|hole|parafusos|parafuso"
+FLANGE_TERMS = "flanges?|flages?"
 
 
 def _first_hole_term_start(text: str) -> int:
@@ -123,9 +124,9 @@ def _extract_flange_outer_diameter(text: str) -> float | None:
     hole_start = _first_hole_term_start(text)
     before_holes = text[:hole_start]
     patterns = [
-        rf"\bflange\s+(?:redondo|circular)?\s*(?:de|com)?\s*{NUMBER}{UNIT}\b",
-        rf"\bflange[^\n.,;:]{{0,80}}?\bdiametro\s*(?:externo|total|do flange|da flange)?\s*(?:de|com|=|:)?\s*{NUMBER}{UNIT}",
-        rf"\bflange[^\n.,;:]{{0,80}}?{NUMBER}{UNIT}\s*(?:de\s*)?diametro\b",
+        rf"\b(?:{FLANGE_TERMS})\s+(?:redondo|circular)?\s*(?:de|com)?\s*{NUMBER}{UNIT}\b",
+        rf"\b(?:{FLANGE_TERMS})[^\n.,;:]{{0,80}}?\bdiametro\s*(?:externo|total|do flange|da flange)?\s*(?:de|com|=|:)?\s*{NUMBER}{UNIT}",
+        rf"\b(?:{FLANGE_TERMS})[^\n.,;:]{{0,80}}?{NUMBER}{UNIT}\s*(?:de\s*)?diametro\b",
     ]
     for pattern in patterns:
         match = re.search(pattern, before_holes)
@@ -250,7 +251,9 @@ def _extract_material(text: str) -> str | None:
 
 def _detect_part_type(text: str) -> tuple[str, list[str]]:
     assumptions: list[str] = []
-    if _contains_any(text, ("flange", "disco com furos")):
+    if re.search(rf"\b(?:{FLANGE_TERMS})\b", text) or "disco com furos" in text:
+        if re.search(r"\bflage[s]?\b", text) and not re.search(r"\bflange[s]?\b", text):
+            assumptions.append("Interpretando 'flage' como flange.")
         return "flange", assumptions
     if _contains_any(text, ("suporte em l", "cantoneira", "bracket", "mao francesa")):
         return "l_bracket", assumptions
