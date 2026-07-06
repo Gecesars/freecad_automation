@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from app.viewer3d.fallback_image_viewer import generate_mesh_previews
+from app.workers.mesh_loader_worker import MeshLoaderWorker
 
 
 @dataclass(frozen=True)
@@ -19,47 +20,36 @@ class ViewerWorkerResult:
     face_count: int = 0
     vertex_count: int = 0
     preview_images: dict[str, Path] = field(default_factory=dict)
+    display_mesh_path: Path | None = None
+    original_face_count: int = 0
+    original_vertex_count: int = 0
+    lod_mode: str = "complete"
+    load_seconds: float = 0.0
     error: str = ""
 
 
 class ViewerWorker:
     def prepare(self, mesh_path: Path, output_dir: Path, max_faces: int = 250_000) -> ViewerWorkerResult:
         try:
-            import numpy as np
-            import trimesh
-
             mesh_path = mesh_path.expanduser().resolve()
-            mesh = trimesh.load_mesh(str(mesh_path), force="mesh")
-            if mesh.is_empty:
-                raise ValueError("malha vazia")
-            if len(mesh.faces) > max_faces:
-                mesh = mesh.simplify_quadric_decimation(face_count=max_faces)
-            vertices = np.asarray(mesh.vertices, dtype=float)
-            faces = np.asarray(mesh.faces, dtype=int)
-            bounds = np.asarray(mesh.bounds, dtype=float)
-            lengths = bounds[1] - bounds[0]
+            info = MeshLoaderWorker().prepare(mesh_path, output_dir)
+            if not info.ok or info.display_path is None:
+                raise ValueError(info.error or info.message)
             previews = generate_mesh_previews(mesh_path, output_dir)
             return ViewerWorkerResult(
                 ok=True,
-                viewer_mode="trimesh",
+                viewer_mode="vtk",
                 mesh_path=mesh_path,
-                message=f"Malha pronta: {len(vertices)} vertices, {len(faces)} faces.",
-                vertices=vertices,
-                faces=faces,
-                bbox={
-                    "x": float(lengths[0]),
-                    "y": float(lengths[1]),
-                    "z": float(lengths[2]),
-                    "xmin": float(bounds[0][0]),
-                    "ymin": float(bounds[0][1]),
-                    "zmin": float(bounds[0][2]),
-                    "xmax": float(bounds[1][0]),
-                    "ymax": float(bounds[1][1]),
-                    "zmax": float(bounds[1][2]),
-                },
-                face_count=int(len(faces)),
-                vertex_count=int(len(vertices)),
+                message=info.message,
+                bbox=info.bbox or {},
+                face_count=info.triangles,
+                vertex_count=info.points,
                 preview_images=previews,
+                display_mesh_path=info.display_path,
+                original_face_count=info.original_triangles or info.triangles,
+                original_vertex_count=info.original_points or info.points,
+                lod_mode=info.mode,
+                load_seconds=info.load_seconds,
             )
         except Exception as exc:
             previews: dict[str, Path] = {}

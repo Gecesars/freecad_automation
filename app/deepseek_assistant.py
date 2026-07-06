@@ -9,6 +9,7 @@ from pathlib import Path
 import requests
 
 from app.models import PartSpec, SearchResult
+from app.spec_formatter import standardize_part_spec
 from app.settings import APP_DIR
 
 
@@ -94,6 +95,7 @@ class DeepSeekMacroAssistant:
                     "content": json.dumps(
                         {
                             "task": "Create a robust FreeCAD Part body for this parsed CAD prompt.",
+                            "standardized_request": standardize_part_spec(spec),
                             "part_spec": spec.to_dict(),
                             "rag_context": [
                                 {
@@ -169,6 +171,7 @@ class DeepSeekMacroAssistant:
                     "content": json.dumps(
                         {
                             "task": "Review whether this parsed spec and deterministic macro strategy match the user's CAD intent. Answer in Portuguese.",
+                            "standardized_request": standardize_part_spec(spec),
                             "part_spec": spec.to_dict(),
                             "rag_context": [
                                 {"title": result.title, "url": result.url, "text": result.text[:700]}

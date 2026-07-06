@@ -112,12 +112,53 @@ def _extract_named_dimension(text: str, aliases: tuple[str, ...]) -> float | Non
 
 
 HOLE_TERMS = "furos|furo|furus|furu|holes|hole|parafusos|parafuso"
+SLOT_TERMS = "rasgo|slot|oblongo|fenda|ranhura"
 FLANGE_TERMS = "flanges?|flages?"
 
 
 def _first_hole_term_start(text: str) -> int:
     match = re.search(rf"\b(?:{HOLE_TERMS})\b", text)
     return match.start() if match else len(text)
+
+
+def _first_feature_term_start(text: str) -> int:
+    starts = [
+        match.start()
+        for match in re.finditer(rf"\b(?:{HOLE_TERMS}|{SLOT_TERMS}|chanfro|chamfer|arredond|fillet|nervura|reforco|rib)\b", text)
+    ]
+    return min(starts) if starts else len(text)
+
+
+def _part_dimension_text(text: str) -> str:
+    start = _first_feature_term_start(text)
+    return text[:start] if start < len(text) else text
+
+
+def _normalize_unit_typos(text: str) -> str:
+    return re.sub(r"(?<=\d)\s*m{3,}\b", "mm", text)
+
+
+def _strip_cad_operation_directives(prompt: str) -> str:
+    return re.sub(r"\[CAD_OP\b.*?\]", " ", prompt, flags=re.IGNORECASE | re.DOTALL)
+
+
+def _extract_plate_pair_dimensions(text: str) -> tuple[float, float] | None:
+    patterns = [
+        rf"\b(?:placa|chapa|base|plate)[^\n.,;:]{{0,90}}?{NUMBER}{UNIT}\s*[xX*]\s*{NUMBER}{UNIT}",
+        rf"\b{NUMBER}{UNIT}\s*[xX*]\s*{NUMBER}{UNIT}\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        groups = match.groups()
+        unit = groups[-1] or groups[-3] or "mm"
+        return to_mm(groups[-4], groups[-3] or unit), to_mm(groups[-2], groups[-1] or unit)
+    square = re.search(rf"\bquadrad[ao]\s*(?:de|com)?\s*{NUMBER}{UNIT}\b", text)
+    if square:
+        value = to_mm(square.group(1), square.group(2))
+        return value, value
+    return None
 
 
 def _extract_flange_outer_diameter(text: str) -> float | None:
@@ -153,6 +194,35 @@ def _extract_thread(text: str) -> str | None:
     number = float((match.group(1) or match.group(2)).replace(",", "."))
     text_value = f"{number:g}"
     return f"M{text_value}"
+
+
+def _extract_slot_dimensions(text: str) -> tuple[float | None, float | None]:
+    pair = _extract_pair_after(text, tuple(SLOT_TERMS.split("|")))
+    slot_match = re.search(rf"\b(?:{SLOT_TERMS})\b", text)
+    if not slot_match:
+        return (pair[0], pair[1]) if pair else (None, None)
+    tail = text[slot_match.end() : slot_match.end() + 180]
+    length = _extract_named_dimension(tail, ("comprimento", "length", "longo"))
+    width = _extract_named_dimension(tail, ("largura", "width"))
+    if pair and length is None and width is None:
+        return pair
+    return length, width
+
+
+def _parse_cad_operation_features(prompt: str) -> list[Feature]:
+    features: list[Feature] = []
+    for match in re.finditer(r"\[CAD_OP\s+([a-zA-Z_][a-zA-Z0-9_-]*)(.*?)\]", prompt, flags=re.DOTALL):
+        op = match.group(1).strip().lower().replace("-", "_")
+        raw_params = match.group(2)
+        params: dict[str, object] = {"op": op}
+        for key, raw_value in re.findall(r"([a-zA-Z_][a-zA-Z0-9_]*)=('[^']*'|\"[^\"]*\"|[^\s\]]+)", raw_params):
+            value = raw_value.strip().strip("'\"")
+            try:
+                params[key] = float(value.replace(",", "."))
+            except ValueError:
+                params[key] = value
+        features.append(Feature("cad_op", params))
+    return features
 
 
 def _extract_hole_diameter(text: str) -> float | None:
@@ -272,7 +342,9 @@ def parse_prompt(prompt: str) -> PartSpec:
     if not prompt:
         raise ValueError("Digite um prompt descrevendo a peca.")
 
-    text = normalize_text(prompt)
+    natural_prompt = _strip_cad_operation_directives(prompt)
+    text = _normalize_unit_typos(normalize_text(natural_prompt))
+    dimension_text = _part_dimension_text(text)
     part_type, assumptions = _detect_part_type(text)
     warnings: list[str] = []
     dimensions: dict[str, float] = {}
@@ -280,9 +352,15 @@ def parse_prompt(prompt: str) -> PartSpec:
     material = _extract_material(text)
     flange_outer_diameter = _extract_flange_outer_diameter(text) if part_type == "flange" else None
 
-    box_dims = _extract_box_dimensions(text)
+    features.extend(_parse_cad_operation_features(prompt))
+
+    box_dims = _extract_box_dimensions(dimension_text)
     if box_dims:
         dimensions["length"], dimensions["width"], dimensions["height"] = box_dims
+    elif part_type == "plate":
+        plate_pair = _extract_plate_pair_dimensions(dimension_text)
+        if plate_pair:
+            dimensions["length"], dimensions["width"] = plate_pair
     if flange_outer_diameter is not None:
         dimensions["diameter"] = flange_outer_diameter
         dimensions["outer_diameter"] = flange_outer_diameter
@@ -291,7 +369,7 @@ def parse_prompt(prompt: str) -> PartSpec:
         "length": ("comprimento", "longo", "length", "base"),
         "width": ("largura", "width"),
         "height": ("altura", "height", "alto"),
-        "thickness": ("espessura", "espesura", "thickness", "grossura", "chapa"),
+        "thickness": ("espessura", "espesura", "thickness", "grossura"),
         "diameter": ("diametro externo", "diametro", "diameter", "externo"),
         "center_hole": ("furo central", "diametro interno", "furo interno", "miolo"),
         "bolt_circle": ("diametro primitivo", "circulo primitivo", "pcd", "bolt circle"),
@@ -299,7 +377,8 @@ def parse_prompt(prompt: str) -> PartSpec:
         "margin": ("margem", "afastamento"),
     }
     for key, aliases in named_aliases.items():
-        value = _extract_named_dimension(text, aliases)
+        source_text = dimension_text if key in {"length", "width", "height", "wall", "margin"} else text
+        value = _extract_named_dimension(source_text, aliases)
         if value is not None:
             dimensions[key] = value
     if flange_outer_diameter is not None:
@@ -342,11 +421,13 @@ def parse_prompt(prompt: str) -> PartSpec:
     if part_type == "cylinder" and "height" in dimensions and "length" not in dimensions:
         dimensions["length"] = dimensions.pop("height")
 
-    slot_pair = _extract_pair_after(text, ("rasgo", "slot", "oblongo"))
-    if _contains_any(text, ("rasgo", "slot", "oblongo")):
-        params = {"position": "center" if "central" in text or "centro" in text else "center"}
-        if slot_pair:
-            params["length"], params["width"] = slot_pair
+    slot_length, slot_width = _extract_slot_dimensions(text)
+    if _contains_any(text, tuple(SLOT_TERMS.split("|"))):
+        params = {"position": "center" if any(word in text for word in ("central", "centro", "dentro")) else "center"}
+        if slot_length is not None:
+            params["length"] = slot_length
+        if slot_width is not None:
+            params["width"] = slot_width
         features.append(Feature("slot", params))
 
     if hole_count:

@@ -134,6 +134,7 @@ def _expected_outputs(script_path: Path, output_dir: Path) -> dict[str, Path]:
         "STL": output_dir / f"{stem}.stl",
         "BREP": output_dir / f"{stem}.brep",
         "OBJ": output_dir / f"{stem}.obj",
+        "topology": output_dir / f"{stem}_topology.json",
         "metadata": output_dir / f"{stem}_metadata.json",
         "build_report": output_dir / f"{stem}_build_report.md",
         "thumbnail": output_dir / f"{stem}_thumbnail.png",

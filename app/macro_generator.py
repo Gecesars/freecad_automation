@@ -38,6 +38,7 @@ class MacroGenerator:
             "STL": self.output_dir / f"{base_name}.stl",
             "BREP": self.output_dir / f"{base_name}.brep",
             "OBJ": self.output_dir / f"{base_name}.obj",
+            "topology": self.output_dir / f"{base_name}_topology.json",
             "metadata": self.output_dir / f"{base_name}_metadata.json",
             "build_report": self.output_dir / f"{base_name}_build_report.md",
             "thumbnail": self.output_dir / f"{base_name}_thumbnail.png",
@@ -136,30 +137,71 @@ def ensure_dir(path):
     return path
 
 
-def add_shape(doc, name, shape):
+BUILD_STEPS = []
+
+
+def step_name(prefix):
+    safe = "".join(ch if ch.isalnum() else "_" for ch in str(prefix)).strip("_") or "Step"
+    return f"{{len(BUILD_STEPS) + 1:03d}}_{{safe}}"
+
+
+def record_shape(name, shape, role="step", operation="", visible=False):
+    BUILD_STEPS.append({{"name": step_name(name), "shape": shape, "role": role, "operation": operation, "visible": bool(visible)}})
+    return shape
+
+
+def add_shape(doc, name, shape, container=None, role="shape", operation="", visible=True):
     obj = doc.addObject("Part::Feature", name)
     obj.Shape = shape
     try:
         obj.Label = name
+        obj.addProperty("App::PropertyString", "PromptForgeRole", "PromptForge", "Prompt Forge role")
+        obj.PromptForgeRole = str(role)
+        obj.addProperty("App::PropertyString", "PromptForgeOperation", "PromptForge", "Prompt Forge operation")
+        obj.PromptForgeOperation = str(operation or "")
         if MATERIAL_NAME:
             obj.Material = {{"Name": MATERIAL_NAME}}
         if hasattr(obj, "ViewObject") and obj.ViewObject:
             obj.ViewObject.ShapeColor = MATERIAL_COLOR
+            obj.ViewObject.Visibility = bool(visible)
+            if not visible and role in {{"tool", "construction", "intermediate"}}:
+                obj.ViewObject.Transparency = 75
+            try:
+                obj.ViewObject.DisplayMode = "Flat Lines"
+            except Exception:
+                pass
+        if container is not None:
+            try:
+                container.addObject(obj)
+            except Exception as exc:
+                log(f"Could not add {{name}} to container: {{exc}}")
     except Exception as exc:
         log(f"Visual material skipped: {{exc}}")
     return obj
 
 
-def cut_cylinder(shape, radius, height, base, direction):
+def apply_cut(source, tool, name="Cut"):
+    record_shape(name + "_Tool", tool, role="tool", operation="subtract", visible=False)
+    result = source.cut(tool)
+    return record_shape(name + "_Result", result, role="intermediate", operation="cut", visible=False)
+
+
+def apply_fuse(source, tool, name="Fuse"):
+    record_shape(name + "_Tool", tool, role="tool", operation="add", visible=False)
+    result = source.fuse(tool)
+    return record_shape(name + "_Result", result, role="intermediate", operation="fuse", visible=False)
+
+
+def cut_cylinder(shape, radius, height, base, direction, name="CylinderCut"):
     tool = Part.makeCylinder(radius, height, base, direction)
-    return shape.cut(tool)
+    return apply_cut(shape, tool, name)
 
 
 def safe_fillet(shape, radius):
     if radius <= 0:
         return shape
     try:
-        return shape.makeFillet(radius, shape.Edges)
+        return record_shape("Fillet", shape.makeFillet(radius, shape.Edges), role="intermediate", operation="fillet", visible=False)
     except Exception as exc:
         log(f"Fillet skipped: {{exc}}")
         return shape
@@ -169,10 +211,65 @@ def safe_chamfer(shape, distance):
     if distance <= 0:
         return shape
     try:
-        return shape.makeChamfer(distance, shape.Edges)
+        return record_shape("Chamfer", shape.makeChamfer(distance, shape.Edges), role="intermediate", operation="chamfer", visible=False)
     except Exception as exc:
         log(f"Chamfer skipped: {{exc}}")
     return shape
+
+
+def create_project_tree(doc, final_shape):
+    try:
+        project = doc.addObject("App::DocumentObjectGroup", "PromptForge_Project")
+        project.Label = "PromptForge Project"
+    except Exception as exc:
+        log(f"Project group unavailable; falling back to document root: {{exc}}")
+        project = None
+    try:
+        history = doc.addObject("App::DocumentObjectGroup", "Construction_History")
+        history.Label = "Construction History"
+        if project is not None:
+            project.addObject(history)
+    except Exception as exc:
+        log(f"History group unavailable; operation nodes will stay at document root: {{exc}}")
+        history = None
+    created = []
+    for step in BUILD_STEPS:
+        try:
+            node = doc.addObject("App::FeaturePython", step.get("name", "BuildStep"))
+            node.Label = step.get("name", "BuildStep")
+            node.addProperty("App::PropertyString", "PromptForgeRole", "PromptForge", "Prompt Forge role")
+            node.PromptForgeRole = str(step.get("role", "step"))
+            node.addProperty("App::PropertyString", "PromptForgeOperation", "PromptForge", "Prompt Forge operation")
+            node.PromptForgeOperation = str(step.get("operation", ""))
+            shape_value = step.get("shape")
+            if shape_value is not None:
+                try:
+                    bbox = shape_value.BoundBox
+                    node.addProperty("App::PropertyString", "PromptForgeBBox", "PromptForge", "Bounding box")
+                    node.PromptForgeBBox = json.dumps(bbox_payload(bbox), ensure_ascii=False)
+                except Exception:
+                    pass
+            if history is not None:
+                history.addObject(node)
+            created.append(node)
+        except Exception as exc:
+            log(f"Could not create tree node {{step.get('name')}}: {{exc}}")
+    final_obj = add_shape(
+        doc,
+        "Final_GeneratedPart",
+        final_shape,
+        container=None,
+        role="final",
+        operation="result",
+        visible=True,
+    )
+    try:
+        if hasattr(final_obj, "ViewObject") and final_obj.ViewObject:
+            final_obj.ViewObject.ShapeColor = MATERIAL_COLOR
+            final_obj.ViewObject.Visibility = True
+    except Exception as exc:
+        log(f"Tree visibility skipped: {{exc}}")
+    return final_obj, project, created
 
 
 def validate_shape(shape, name):
@@ -221,7 +318,194 @@ def validate_shape(shape, name):
         raise
 
 
-def export_outputs(doc, obj):
+def feature_metadata(spec_payload):
+    dimensions = spec_payload.get("dimensions", {{}})
+    features = []
+    for feature in spec_payload.get("features", []):
+        kind = feature.get("kind")
+        params = dict(feature.get("params", {{}}))
+        item = {{"kind": kind, **params}}
+        if kind == "bolt_circle_holes":
+            count = int(params.get("count", dimensions.get("hole_count", 0)) or 0)
+            radius = float(params.get("radius", dimensions.get("bolt_circle_radius", 0.0)) or 0.0)
+            diameter = float(params.get("diameter", dimensions.get("hole_diameter", 0.0)) or 0.0)
+            item.update(
+                {{
+                    "count": count,
+                    "diameter": diameter,
+                    "radius": radius,
+                    "diameter_pcd": float(params.get("diameter_primitive", dimensions.get("bolt_circle_diameter", radius * 2.0)) or radius * 2.0),
+                    "positions": [
+                        {{
+                            "x": radius * math.cos(2.0 * math.pi * idx / count),
+                            "y": radius * math.sin(2.0 * math.pi * idx / count),
+                            "z": 0.0,
+                        }}
+                        for idx in range(count)
+                    ]
+                    if count > 0 and radius > 0
+                    else [],
+                }}
+            )
+        features.append(item)
+    return features
+
+
+def shape_metadata(validation):
+    bbox = validation.get("bbox", {{}})
+    return {{
+        "valid": validation.get("valid"),
+        "volume_mm3": validation.get("volume"),
+        "area_mm2": validation.get("area"),
+        "faces": validation.get("faces"),
+        "edges": validation.get("edges"),
+        "solids": validation.get("solids"),
+        "bbox": {{
+            "x": bbox.get("x_length"),
+            "y": bbox.get("y_length"),
+            "z": bbox.get("z_length"),
+            "xmin": bbox.get("xmin"),
+            "xmax": bbox.get("xmax"),
+            "ymin": bbox.get("ymin"),
+            "ymax": bbox.get("ymax"),
+            "zmin": bbox.get("zmin"),
+            "zmax": bbox.get("zmax"),
+        }},
+    }}
+
+
+def vector_payload(value):
+    return {{
+        "x": float(getattr(value, "x", 0.0)),
+        "y": float(getattr(value, "y", 0.0)),
+        "z": float(getattr(value, "z", 0.0)),
+    }}
+
+
+def bbox_payload(bbox):
+    return {{
+        "x": float(getattr(bbox, "XLength", 0.0)),
+        "y": float(getattr(bbox, "YLength", 0.0)),
+        "z": float(getattr(bbox, "ZLength", 0.0)),
+        "xmin": float(getattr(bbox, "XMin", 0.0)),
+        "xmax": float(getattr(bbox, "XMax", 0.0)),
+        "ymin": float(getattr(bbox, "YMin", 0.0)),
+        "ymax": float(getattr(bbox, "YMax", 0.0)),
+        "zmin": float(getattr(bbox, "ZMin", 0.0)),
+        "zmax": float(getattr(bbox, "ZMax", 0.0)),
+    }}
+
+
+def curve_payload(edge):
+    payload = {{"type": "unknown"}}
+    try:
+        curve = edge.Curve
+        payload["type"] = str(getattr(curve, "TypeId", curve.__class__.__name__))
+        if hasattr(curve, "Radius"):
+            payload["radius"] = float(curve.Radius)
+            payload["diameter"] = float(curve.Radius) * 2.0
+        if hasattr(curve, "Center"):
+            payload["center"] = vector_payload(curve.Center)
+        if hasattr(curve, "Axis"):
+            payload["axis"] = vector_payload(curve.Axis)
+    except Exception as exc:
+        payload["error"] = str(exc)
+    return payload
+
+
+def surface_payload(face):
+    payload = {{"type": "unknown"}}
+    try:
+        surface = face.Surface
+        payload["type"] = str(getattr(surface, "TypeId", surface.__class__.__name__))
+        if hasattr(surface, "Radius"):
+            payload["radius"] = float(surface.Radius)
+        if hasattr(surface, "Center"):
+            payload["center"] = vector_payload(surface.Center)
+        if hasattr(surface, "Axis"):
+            payload["axis"] = vector_payload(surface.Axis)
+    except Exception as exc:
+        payload["error"] = str(exc)
+    return payload
+
+
+def face_normal(face):
+    try:
+        u_min, u_max, v_min, v_max = face.ParameterRange
+        return vector_payload(face.normalAt((u_min + u_max) / 2.0, (v_min + v_max) / 2.0))
+    except Exception:
+        return None
+
+
+def face_mesh_payload(face, tolerance=0.35):
+    try:
+        vertices, triangles = face.tessellate(tolerance)
+        return {{
+            "vertices": [[float(v.x), float(v.y), float(v.z)] for v in vertices],
+            "triangles": [[int(i), int(j), int(k)] for i, j, k in triangles],
+        }}
+    except Exception as exc:
+        return {{"vertices": [], "triangles": [], "error": str(exc)}}
+
+
+def edge_points_payload(edge, count=96):
+    try:
+        points = edge.discretize(Number=count)
+        return [[float(p.x), float(p.y), float(p.z)] for p in points]
+    except Exception as exc:
+        return {{"error": str(exc), "points": []}}
+
+
+def topology_metadata(shape, metadata, topology_path, canonical_topology_path):
+    topology = {{
+        "units": "mm",
+        "base_name": BASE_NAME,
+        "source": "FreeCAD Part.Shape",
+        "source_files": {{
+            "FCStd": metadata["files"].get("FCStd"),
+            "STEP": metadata["files"].get("STEP"),
+            "BREP": metadata["files"].get("BREP"),
+        }},
+        "part_type": metadata.get("part_type"),
+        "parameters": metadata.get("parameters", {{}}),
+        "features": metadata.get("features", []),
+        "shape": metadata.get("shape", {{}}),
+        "faces": [],
+        "edges": [],
+    }}
+    for index, face in enumerate(getattr(shape, "Faces", []), start=1):
+        mesh = face_mesh_payload(face)
+        topology["faces"].append(
+            {{
+                "id": index,
+                "area": float(getattr(face, "Area", 0.0)),
+                "center": vector_payload(getattr(face, "CenterOfMass", App.Vector(0, 0, 0))),
+                "normal": face_normal(face),
+                "surface": surface_payload(face),
+                "bbox": bbox_payload(face.BoundBox),
+                "mesh": mesh,
+            }}
+        )
+    for index, edge in enumerate(getattr(shape, "Edges", []), start=1):
+        curve = curve_payload(edge)
+        topology["edges"].append(
+            {{
+                "id": index,
+                "length": float(getattr(edge, "Length", 0.0)),
+                "curve": curve,
+                "is_circular": "radius" in curve,
+                "bbox": bbox_payload(edge.BoundBox),
+                "points": edge_points_payload(edge),
+            }}
+        )
+    with open(topology_path, "w", encoding="utf-8") as handle:
+        json.dump(topology, handle, ensure_ascii=False, indent=2)
+    with open(canonical_topology_path, "w", encoding="utf-8") as handle:
+        json.dump(topology, handle, ensure_ascii=False, indent=2)
+    return topology
+
+
+def export_outputs(doc, obj, project_container=None, tree_objects=None):
     output_dir = os.environ.get("PROMPT_FORGE_OUTPUT", DEFAULT_OUTPUT_DIR)
     ensure_dir(output_dir)
     fcstd_path = os.path.join(output_dir, BASE_NAME + ".FCStd")
@@ -229,8 +513,10 @@ def export_outputs(doc, obj):
     stl_path = os.path.join(output_dir, BASE_NAME + ".stl")
     brep_path = os.path.join(output_dir, BASE_NAME + ".brep")
     obj_path = os.path.join(output_dir, BASE_NAME + ".obj")
+    topology_path = os.path.join(output_dir, BASE_NAME + "_topology.json")
     metadata_path = os.path.join(output_dir, BASE_NAME + "_metadata.json")
     report_path = os.path.join(output_dir, BASE_NAME + "_build_report.md")
+    canonical_topology_path = os.path.join(output_dir, "topology.json")
     canonical_metadata_path = os.path.join(output_dir, "metadata.json")
     canonical_report_path = os.path.join(output_dir, "build_report.md")
     thumbnail_path = os.path.join(output_dir, BASE_NAME + "_thumbnail.png")
@@ -279,11 +565,44 @@ def export_outputs(doc, obj):
             log(f"Thumbnail skipped: {{exc}}")
     else:
         log("Thumbnail skipped: PROMPT_FORGE_RENDER_THUMBNAIL not enabled for headless run")
+    spec_payload = json.loads(PART_SPEC)
+    parameters = dict(spec_payload.get("dimensions", {{}}))
+    feature_payload = feature_metadata(spec_payload)
+    shape_payload = shape_metadata(validation)
+    tree_objects = list(tree_objects or [])
+    tree_payload = []
+    for tree_obj in [*tree_objects, obj]:
+        try:
+            tree_payload.append(
+                {{
+                    "name": tree_obj.Name,
+                    "label": tree_obj.Label,
+                    "type": tree_obj.TypeId,
+                    "role": getattr(tree_obj, "PromptForgeRole", ""),
+                    "operation": getattr(tree_obj, "PromptForgeOperation", ""),
+                    "visible": bool(tree_obj.ViewObject.Visibility) if hasattr(tree_obj, "ViewObject") and tree_obj.ViewObject else None,
+                }}
+            )
+        except Exception:
+            pass
     metadata = {{
+        "units": "mm",
         "base_name": BASE_NAME,
         "document": DOC_NAME,
+        "part_type": spec_payload.get("part_type"),
         "material": MATERIAL_NAME,
-        "part_spec": json.loads(PART_SPEC),
+        "input_prompt": {json.dumps(spec.prompt)},
+        "parameters": parameters,
+        "features": feature_payload,
+        "freecad_standard": {{
+            "target": "FreeCAD 1.1 FCStd document",
+            "container": project_container.Name if project_container is not None else None,
+            "container_type": project_container.TypeId if project_container is not None else None,
+            "final_object": obj.Name,
+            "project_tree": tree_payload,
+        }},
+        "shape": shape_payload,
+        "part_spec": spec_payload,
         "validation": validation,
         "files": {{
             "FCStd": fcstd_path,
@@ -291,10 +610,31 @@ def export_outputs(doc, obj):
             "STL": stl_path,
             "BREP": brep_path,
             "OBJ": obj_path,
+            "topology": topology_path,
+            "fcstd": fcstd_path,
+            "step": step_path,
+            "stl": stl_path,
+            "brep": brep_path,
+            "obj": obj_path,
+            "topology_json": topology_path,
             "thumbnail": thumbnail_path if os.path.exists(thumbnail_path) else None,
         }},
         "export_errors": export_errors,
     }}
+    try:
+        topology = topology_metadata(shape, metadata, topology_path, canonical_topology_path)
+        metadata["topology"] = {{
+            "path": topology_path,
+            "canonical_path": canonical_topology_path,
+            "faces": len(topology.get("faces", [])),
+            "edges": len(topology.get("edges", [])),
+            "source": "FreeCAD Part.Shape",
+        }}
+    except Exception:
+        error = "Topology export failed:\\n" + traceback.format_exc()
+        export_errors.append(error)
+        metadata["topology"] = {{"error": error}}
+        log(error)
     with open(metadata_path, "w", encoding="utf-8") as handle:
         json.dump(metadata, handle, ensure_ascii=False, indent=2)
     with open(canonical_metadata_path, "w", encoding="utf-8") as handle:
@@ -308,6 +648,13 @@ def export_outputs(doc, obj):
         handle.write("\\n\\n## Files\\n\\n")
         for key, value in metadata["files"].items():
             handle.write(f"- {{key}}: {{value}}\\n")
+        handle.write("\\n## FreeCAD Project Tree\\n\\n")
+        handle.write(json.dumps(metadata.get("freecad_standard", {{}}), ensure_ascii=False, indent=2))
+        handle.write("\\n")
+        if metadata.get("topology"):
+            handle.write("\\n## Topology\\n\\n")
+            handle.write(json.dumps(metadata["topology"], ensure_ascii=False, indent=2))
+            handle.write("\\n")
         if export_errors:
             handle.write("\\n## Export Errors\\n\\n")
             for error in export_errors:
@@ -320,6 +667,10 @@ def export_outputs(doc, obj):
     log("Saved: " + stl_path)
     log("Saved: " + brep_path)
     log("Saved: " + obj_path)
+    if os.path.exists(topology_path):
+        log("Saved: " + topology_path)
+    if os.path.exists(canonical_topology_path):
+        log("Saved: " + canonical_topology_path)
     log("Saved: " + metadata_path)
     log("Saved: " + report_path)
     log("Saved: " + canonical_metadata_path)
@@ -331,8 +682,8 @@ def main():
 '''
         tail = '''
     shape, validation = validate_shape(shape, "GeneratedShape")
-    obj = add_shape(doc, "GeneratedPart", shape)
-    export_outputs(doc, obj)
+    obj, project_container, tree_objects = create_project_tree(doc, shape)
+    export_outputs(doc, obj, project_container, tree_objects)
 
 
 if __name__ == "__main__":
@@ -425,29 +776,33 @@ else:
         hole_count, hole_diameter, placement = self._holes(spec)
         margin = min(d.get("margin", 10.0), length / 2.5, width / 2.5)
         hole_points = self._rect_holes(length, width, hole_count, margin, placement)
-        lines = [f"shape = Part.makeBox({format_mm(length)}, {format_mm(width)}, {format_mm(thickness)}, Vector(0, 0, 0))"]
-        for x, y in hole_points:
+        lines = [
+            f"shape = record_shape('Base_Plate', Part.makeBox({format_mm(length)}, {format_mm(width)}, {format_mm(thickness)}, Vector(0, 0, 0)), role='base', operation='create', visible=False)"
+        ]
+        for index, (x, y) in enumerate(hole_points, start=1):
             lines.append(
                 f"shape = cut_cylinder(shape, {format_mm(hole_diameter / 2)}, {format_mm(thickness + 2)}, "
-                f"Vector({format_mm(x)}, {format_mm(y)}, -1), Vector(0, 0, 1))"
+                f"Vector({format_mm(x)}, {format_mm(y)}, -1), Vector(0, 0, 1), 'Hole_{index}')"
             )
         slot = self._feature(spec, "slot")
         if slot:
             slot_length = float(slot.params["length"])
             slot_width = float(slot.params["width"])
             lines.extend(self._slot_cut_lines(slot_length, slot_width, thickness, length / 2, width / 2))
+        lines.extend(self._cad_operation_lines(spec))
         lines.append(self._finish_edges(spec))
         return "\n".join(line for line in lines if line)
 
     def _flange_body(self, spec: PartSpec) -> str:
-        lines = [render_flange_body(spec), self._finish_edges(spec)]
+        lines = [render_flange_body(spec), *self._cad_operation_lines(spec), self._finish_edges(spec)]
         return "\n".join(line for line in lines if line)
 
     def _cylinder_body(self, spec: PartSpec) -> str:
         d = spec.dimensions
         diameter, length = d["diameter"], d["length"]
         lines = [
-            f"shape = Part.makeCylinder({format_mm(diameter / 2)}, {format_mm(length)}, Vector(0, 0, 0), Vector(0, 0, 1))",
+            f"shape = record_shape('Base_Cylinder', Part.makeCylinder({format_mm(diameter / 2)}, {format_mm(length)}, Vector(0, 0, 0), Vector(0, 0, 1)), role='base', operation='create', visible=False)",
+            *self._cad_operation_lines(spec),
             self._finish_edges(spec),
         ]
         return "\n".join(line for line in lines if line)
@@ -458,32 +813,35 @@ else:
         hole_count, hole_diameter, placement = self._holes(spec)
         margin = min(d.get("margin", 10.0), length / 3, width / 3, height / 3)
         lines = [
-            f"base = Part.makeBox({format_mm(length)}, {format_mm(width)}, {format_mm(thickness)}, Vector(0, 0, 0))",
+            f"base = record_shape('L_Base_Flange', Part.makeBox({format_mm(length)}, {format_mm(width)}, {format_mm(thickness)}, Vector(0, 0, 0)), role='base', operation='create', visible=False)",
             f"vertical = Part.makeBox({format_mm(thickness)}, {format_mm(width)}, {format_mm(height)}, Vector(0, 0, {format_mm(thickness)}))",
-            "shape = base.fuse(vertical)",
+            "shape = apply_fuse(base, vertical, 'L_Vertical_Flange')",
         ]
         if hole_count:
             base_count = max(1, hole_count // 2) if placement == "tabs" else min(hole_count, 2)
             vertical_count = max(1, hole_count - base_count) if placement == "tabs" else max(0, hole_count - base_count)
-            for x, y in self._rect_holes(length, width, base_count, margin, "default"):
+            for index, (x, y) in enumerate(self._rect_holes(length, width, base_count, margin, "default"), start=1):
                 lines.append(
                     f"shape = cut_cylinder(shape, {format_mm(hole_diameter / 2)}, {format_mm(thickness + 2)}, "
-                    f"Vector({format_mm(x)}, {format_mm(y)}, -1), Vector(0, 0, 1))"
+                    f"Vector({format_mm(x)}, {format_mm(y)}, -1), Vector(0, 0, 1), 'Base_Hole_{index}')"
                 )
-            for _, y in self._rect_holes(height, width, vertical_count, margin, "default"):
+            for index, (_, y) in enumerate(self._rect_holes(height, width, vertical_count, margin, "default"), start=1):
                 z = margin if vertical_count == 1 else y
                 lines.append(
                     f"shape = cut_cylinder(shape, {format_mm(hole_diameter / 2)}, {format_mm(thickness + 2)}, "
-                    f"Vector(-1, {format_mm(width / 2)}, {format_mm(thickness + z)}), Vector(1, 0, 0))"
+                    f"Vector(-1, {format_mm(width / 2)}, {format_mm(thickness + z)}), Vector(1, 0, 0), 'Vertical_Hole_{index}')"
                 )
         lines.extend(self._rib_lines(length, width, height, thickness))
+        lines.extend(self._cad_operation_lines(spec))
         lines.append(self._finish_edges(spec))
         return "\n".join(line for line in lines if line)
 
     def _box_body(self, spec: PartSpec) -> str:
         d = spec.dimensions
         length, width, height, wall = d["length"], d["width"], d["height"], d["wall"]
-        lines = [f"shape = Part.makeBox({format_mm(length)}, {format_mm(width)}, {format_mm(height)}, Vector(0, 0, 0))"]
+        lines = [
+            f"shape = record_shape('Base_Box', Part.makeBox({format_mm(length)}, {format_mm(width)}, {format_mm(height)}, Vector(0, 0, 0)), role='base', operation='create', visible=False)"
+        ]
         if self._feature(spec, "hollow"):
             inner_length = length - 2 * wall
             inner_width = width - 2 * wall
@@ -492,9 +850,66 @@ else:
                 f"inner = Part.makeBox({format_mm(inner_length)}, {format_mm(inner_width)}, {format_mm(inner_height)}, "
                 f"Vector({format_mm(wall)}, {format_mm(wall)}, {format_mm(wall)}))"
             )
-            lines.append("shape = shape.cut(inner)")
+            lines.append("shape = apply_cut(shape, inner, 'Hollow_Box')")
+        lines.extend(self._cad_operation_lines(spec))
         lines.append(self._finish_edges(spec))
         return "\n".join(line for line in lines if line)
+
+    def _cad_operation_lines(self, spec: PartSpec) -> list[str]:
+        lines: list[str] = []
+        for index, feature in enumerate((item for item in spec.features if item.kind == "cad_op"), start=1):
+            params = feature.params
+            op = str(params.get("op", "")).lower().replace("-", "_")
+
+            def number(name: str, default: float) -> float:
+                try:
+                    return float(params.get(name, default))
+                except (TypeError, ValueError):
+                    return default
+
+            x = number("x", 0.0)
+            y = number("y", 0.0)
+            z = number("z", 0.0)
+            axis = str(params.get("axis", "z")).lower()
+            direction = {
+                "x": "Vector(1, 0, 0)",
+                "y": "Vector(0, 1, 0)",
+                "z": "Vector(0, 0, 1)",
+            }.get(axis, "Vector(0, 0, 1)")
+            tool_name = f"cad_tool_{index}"
+
+            if op in {"add_box", "fuse_box", "subtract_box", "cut_box"}:
+                length = number("length", number("l", 10.0))
+                width = number("width", number("w", 10.0))
+                height = number("height", number("h", spec.dimensions.get("thickness", 10.0)))
+                lines.append(
+                    f"{tool_name} = Part.makeBox({format_mm(length)}, {format_mm(width)}, {format_mm(height)}, "
+                    f"Vector({format_mm(x)}, {format_mm(y)}, {format_mm(z)}))"
+                )
+                lines.append(
+                    f"shape = apply_cut(shape, {tool_name}, 'CAD_{index}_{op}')"
+                    if op.startswith(("subtract", "cut"))
+                    else f"shape = apply_fuse(shape, {tool_name}, 'CAD_{index}_{op}')"
+                )
+                continue
+
+            if op in {"add_cylinder", "fuse_cylinder", "subtract_cylinder", "cut_cylinder", "hole", "drill"}:
+                diameter = number("diameter", number("dia", 6.0))
+                height = number("height", number("depth", spec.dimensions.get("thickness", 10.0) + 2.0))
+                lines.append(
+                    f"{tool_name} = Part.makeCylinder({format_mm(diameter / 2.0)}, {format_mm(height)}, "
+                    f"Vector({format_mm(x)}, {format_mm(y)}, {format_mm(z)}), {direction})"
+                )
+                cut = op.startswith(("subtract", "cut")) or op in {"hole", "drill"}
+                lines.append(
+                    f"shape = apply_cut(shape, {tool_name}, 'CAD_{index}_{op}')"
+                    if cut
+                    else f"shape = apply_fuse(shape, {tool_name}, 'CAD_{index}_{op}')"
+                )
+                continue
+
+            lines.append(f"log('CAD_OP ignorada: {op}')")
+        return lines
 
     def _finish_edges(self, spec: PartSpec) -> str:
         fillet = spec.feature("fillet")
@@ -524,7 +939,7 @@ else:
             "slot = Part.makeBox(straight, slot_width, slot_height, Vector(slot_x - straight / 2, slot_y - slot_width / 2, -1))",
             "slot = slot.fuse(Part.makeCylinder(slot_width / 2, slot_height, Vector(slot_x - straight / 2, slot_y, -1), Vector(0, 0, 1)))",
             "slot = slot.fuse(Part.makeCylinder(slot_width / 2, slot_height, Vector(slot_x + straight / 2, slot_y, -1), Vector(0, 0, 1)))",
-            "shape = shape.cut(slot)",
+            "shape = apply_cut(shape, slot, 'Slot')",
         ]
 
     def _rect_holes(
@@ -571,6 +986,6 @@ else:
             "    ])",
             f"    return Part.Face(wire).extrude(Vector(0, {format_mm(rib_width)}, 0))",
         ]
-        for y in y_positions:
-            lines.append(f"shape = shape.fuse(make_rib({format_mm(y)}))")
+        for index, y in enumerate(y_positions, start=1):
+            lines.append(f"shape = apply_fuse(shape, make_rib({format_mm(y)}), 'Rib_{index}')")
         return lines

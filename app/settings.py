@@ -12,6 +12,7 @@ JOBS_DIR = OUTPUT_DIR / "jobs"
 LOG_DIR = DATA_DIR / "logs"
 DIAGNOSTICS_DIR = DATA_DIR / "diagnostics"
 REPAIRS_DIR = DATA_DIR / "repairs"
+VIEWER_CACHE_DIR = DATA_DIR / "cache" / "viewer_lod"
 SOURCES_FILE = RAG_DIR / "sources.json"
 CHUNKS_FILE = RAG_DIR / "chunks.json"
 VECTORS_FILE = RAG_DIR / "tfidf.joblib"
@@ -33,5 +34,5 @@ DEFAULT_FREECAD_CANDIDATES = [
     *[str(path) for path in sorted(Path("/opt").glob("**/FreeCAD*.AppImage"))[:20]],
 ]
 
-for directory in (DATA_DIR, DOCS_DIR, RAG_DIR, MACROS_DIR, OUTPUT_DIR, JOBS_DIR, LOG_DIR, DIAGNOSTICS_DIR, REPAIRS_DIR):
+for directory in (DATA_DIR, DOCS_DIR, RAG_DIR, MACROS_DIR, OUTPUT_DIR, JOBS_DIR, LOG_DIR, DIAGNOSTICS_DIR, REPAIRS_DIR, VIEWER_CACHE_DIR):
     directory.mkdir(parents=True, exist_ok=True)

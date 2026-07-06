@@ -22,6 +22,29 @@ def test_parse_plate_with_words_material_slot_and_corner_holes() -> None:
     assert slot.params["width"] == 12
 
 
+def test_parse_square_plate_with_fenda_keeps_base_dimensions() -> None:
+    spec = parse_prompt(
+        "chapa quadrada de 100x100mm por 3mmm de espessura, com uma fenda no dentro de largura 20mm e comprimento de 50mm"
+    )
+    assert spec.part_type == "plate"
+    assert spec.dimensions["length"] == 100
+    assert spec.dimensions["width"] == 100
+    assert spec.dimensions["thickness"] == 3
+    slot = spec.feature("slot")
+    assert slot is not None
+    assert slot.params["length"] == 50
+    assert slot.params["width"] == 20
+
+
+def test_parse_cad_operation_directive() -> None:
+    spec = parse_prompt("placa 100x80x6 [CAD_OP subtract_cylinder diameter=8 height=10 x=50 y=40 z=-1 axis=z]")
+    operation = spec.feature("cad_op")
+    assert operation is not None
+    assert operation.params["op"] == "subtract_cylinder"
+    assert operation.params["diameter"] == 8
+    assert operation.params["x"] == 50
+
+
 def test_parse_flange() -> None:
     spec = parse_prompt("flange circular de 100 mm de diametro, 10 mm de espessura, furo central de 30 mm e 6 furos de 8 mm")
     assert spec.part_type == "flange"

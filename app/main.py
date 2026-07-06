@@ -100,7 +100,67 @@ QComboBox, QDoubleSpinBox, QTreeWidget {
     selection-background-color: #2666a3;
     selection-color: #ffffff;
 }
-QCheckBox { color: #172333; }
+QComboBox QAbstractItemView, QAbstractItemView {
+    background: #ffffff;
+    color: #111827;
+    border: 1px solid #9aa7b7;
+    selection-background-color: #2666a3;
+    selection-color: #ffffff;
+    outline: 0;
+}
+QTreeWidget::item {
+    color: #111827;
+    background: #ffffff;
+    padding: 2px;
+}
+QTreeWidget::item:selected {
+    color: #ffffff;
+    background: #2666a3;
+}
+QMenu {
+    background: #ffffff;
+    color: #111827;
+    border: 1px solid #8fa0b3;
+    padding: 4px;
+}
+QMenu::item {
+    background: transparent;
+    color: #111827;
+    padding: 6px 30px 6px 24px;
+}
+QMenu::item:selected {
+    background: #2666a3;
+    color: #ffffff;
+}
+QMenu::item:disabled {
+    color: #6b7280;
+}
+QMenu::separator {
+    height: 1px;
+    background: #c8d0da;
+    margin: 5px 8px;
+}
+QCheckBox { color: #172333; spacing: 5px; }
+QCheckBox::indicator {
+    width: 14px;
+    height: 14px;
+    border: 1px solid #5f6b7a;
+    background: #ffffff;
+}
+QCheckBox::indicator:checked {
+    background: #1f6fb2;
+    border: 1px solid #155a94;
+}
+QCheckBox::indicator:disabled {
+    background: #d8dde5;
+    border: 1px solid #9aa7b7;
+}
+QToolTip {
+    background: #111827;
+    color: #ffffff;
+    border: 1px solid #374151;
+    padding: 4px;
+}
 QTabWidget::pane {
     border: 1px solid #c8d0da;
     background: #ffffff;
@@ -169,15 +229,25 @@ def run_cli(args: argparse.Namespace) -> int:
             mesh_path = run_result.output_paths.get("STL") or run_result.output_paths.get("OBJ")
             if mesh_path:
                 viewer_result = ViewerWorker().prepare(mesh_path, job_result.job_dir)
+                topology_path = None
+                if run_result:
+                    topology_path = run_result.output_paths.get("topology") or run_result.output_paths.get("prefixed_topology")
                 viewer_payload = {
                     "ok": viewer_result.ok,
                     "mode": viewer_result.viewer_mode,
                     "message": viewer_result.message,
                     "mesh_path": str(viewer_result.mesh_path) if viewer_result.mesh_path else None,
+                    "display_mesh_path": str(viewer_result.display_mesh_path) if viewer_result.display_mesh_path else None,
+                    "topology_path": str(topology_path) if topology_path else None,
+                    "topology_available": bool(topology_path and topology_path.exists()),
                     "preview_images": {key: str(value) for key, value in viewer_result.preview_images.items()},
                     "bbox": viewer_result.bbox,
                     "faces": viewer_result.face_count,
                     "vertices": viewer_result.vertex_count,
+                    "original_faces": viewer_result.original_face_count,
+                    "original_vertices": viewer_result.original_vertex_count,
+                    "lod_mode": viewer_result.lod_mode,
+                    "load_seconds": viewer_result.load_seconds,
                     "error": viewer_result.error,
                 }
                 print(f"[viewer] {viewer_result.message}", flush=True)

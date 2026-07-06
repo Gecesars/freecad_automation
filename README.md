@@ -14,8 +14,8 @@ O foco do projeto e transformar descricoes como "flange redondo de 80 mm com 8 f
 - Integracao opcional com DeepSeek via `.env`, sem chave hardcoded no codigo.
 - RAG local com BM25 + TF-IDF sobre documentacao e API do FreeCAD.
 - Execucao robusta do FreeCAD headless com timeout, logs e relatorios.
-- Exportacao para `.FCStd`, `.STEP`, `.STL`, `.OBJ`, `.BREP`, metadata JSON e relatorio Markdown.
-- Viewer fallback por malha STL/OBJ com preview solido, vistas ISO/frente/topo/lateral, rotacao, zoom, bbox, eixos e exportacao PNG.
+- Exportacao para `.FCStd`, `.STEP`, `.STL`, `.OBJ`, `.BREP`, `topology.json`, metadata JSON e relatorio Markdown.
+- Viewer principal VTK com topologia CAD exportada do FreeCAD, renderizacao rapida, bbox, eixos, grade, PCD, centros de furos, medicao ponto a ponto, relatorio de inspecao e fallback STL/PNG.
 - Importadores/diagnosticos para DXF, SVG, DWG, STEP e malhas.
 - Suite de testes automatizados com `pytest`.
 
@@ -29,7 +29,8 @@ Prompt do usuario
   -> DeepSeek revisa a intencao/macro quando configurado
   -> gerador deterministico cria a macro FreeCAD
   -> FreeCAD headless executa e exporta arquivos CAD
-  -> viewer carrega STL/OBJ e gera previews
+  -> viewer carrega topologia CAD quando disponivel
+  -> STL/OBJ ficam como fallback visual e previews
 ```
 
 Para pecas parametrizadas conhecidas, o gerador local validado e a fonte de verdade da geometria. O DeepSeek ajuda na revisao e no contexto, mas nao deve sobrescrever dimensoes ja validadas pelo parser.
@@ -116,7 +117,7 @@ Ou:
 ./run.sh
 ```
 
-A janela abre maximizada e mostra:
+A janela abre com decoracao nativa do Ubuntu e mostra:
 
 - `Prompt CAD`: cria macro, executa headless, gera/exporta e visualiza.
 - `Visualizacao 3D`: carrega a malha gerada e permite navegar a peca.
@@ -129,6 +130,19 @@ A janela abre maximizada e mostra:
 - `Diagnostico Visual`: ajuda a investigar viewer/importacao.
 - `Configuracoes`: caminhos e opcoes.
 - `Logs`: saidas do app e do FreeCAD.
+
+Na aba `Visualizacao 3D`, o viewer principal usa VTK nativo com:
+
+- vistas iso/frente/topo/lateral, zoom e reset;
+- modos shaded, shaded com arestas e wireframe;
+- alternancia preview/completo quando houver LOD decimado;
+- selecao tecnica de objeto, face, edge e ponto;
+- eixos, grade, bounding box, cotas X/Y/Z, PCD e centros dos furos;
+- medicao ponto a ponto com distancia 3D e delta X/Y/Z;
+- medicao por selecao: face CAD mostra area, edge CAD mostra comprimento real; edges circulares mostram raio/diametro/circunferencia pela curva do FreeCAD;
+- exportacao PNG e relatorio de inspecao CAD.
+
+Quando `topology.json` existe, a UI usa esse arquivo como fonte de analise. O STL continua sendo gerado para compatibilidade, preview e fallback.
 
 ## Rodar via CLI
 
@@ -188,6 +202,7 @@ Cada job pode conter:
 - `.STL`
 - `.OBJ`
 - `.BREP`
+- `topology.json` com faces/edges reais do `Part.Shape`
 - `metadata.json`
 - `build_report.md`
 - previews PNG
@@ -262,6 +277,12 @@ Teste completo:
 make full-test
 ```
 
+Benchmark do viewer:
+
+```bash
+.venv/bin/python scripts/benchmark_viewer.py
+```
+
 Importadores:
 
 ```bash
@@ -284,7 +305,7 @@ app/
   rag_*.py                    ingestao, consulta e auditoria RAG
   generators/                 geradores por tipo de peca
   importers/                  DXF, DWG, SVG, STEP e mesh
-  viewer3d/                   viewers e previews 3D
+  viewer3d/                   viewer VTK, fallback PNG, LOD, medicao e inspecao CAD
   workers/                    workers Qt/processos
   diagnostics/                pacotes e relatorios de falha
 

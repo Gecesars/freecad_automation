@@ -57,8 +57,10 @@ def expected_outputs(macro_path: Path, output_dir: Path) -> dict[str, Path]:
         "STL": output_dir / f"{stem}.stl",
         "OBJ": output_dir / f"{stem}.obj",
         "BREP": output_dir / f"{stem}.brep",
+        "topology": output_dir / "topology.json",
         "metadata": output_dir / "metadata.json",
         "build_report": output_dir / "build_report.md",
+        "prefixed_topology": output_dir / f"{stem}_topology.json",
         "prefixed_metadata": output_dir / f"{stem}_metadata.json",
         "prefixed_build_report": output_dir / f"{stem}_build_report.md",
     }
@@ -71,6 +73,8 @@ def created_outputs(macro_path: Path, output_dir: Path) -> dict[str, Path]:
         created["metadata"] = created["prefixed_metadata"]
     if "build_report" not in created and "prefixed_build_report" in created:
         created["build_report"] = created["prefixed_build_report"]
+    if "topology" not in created and "prefixed_topology" in created:
+        created["topology"] = created["prefixed_topology"]
     return created
 
 
@@ -163,7 +167,7 @@ class FreeCADWorker:
                 }
                 attempts.append(attempt)
                 created = created_outputs(macro_path, output_dir)
-                required = {"FCStd", "STEP", "STL", "OBJ", "metadata", "build_report"}
+                required = {"FCStd", "STEP", "STL", "OBJ", "metadata", "build_report", "topology"}
                 if result.ok and required.issubset(created):
                     payload = FreeCADWorkerResult(
                         success=True,
