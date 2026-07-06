@@ -1,0 +1,36 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
+*.zip
+imp.md
+
+# Runtime/generated CAD artifacts
+data/outputs/*
+!data/outputs/.gitkeep
+data/macros/*
+!data/macros/.gitkeep
+data/logs/*
+!data/logs/.gitkeep
+data/diagnostics/*
+!data/diagnostics/.gitkeep
+data/repairs/*
+!data/repairs/.gitkeep
+
+# Local FreeCAD/RAG knowledge base artifacts. Rebuild with `make ingest`.
+data/docs/*
+!data/docs/.gitkeep
+data/rag/*
+!data/rag/.gitkeep
+data/knowledge/*
+!data/knowledge/.gitkeep
+
+# Optional local binary/vendor experiments
+vendor/debs/*
+vendor/lib/*

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=FreeCAD Prompt Forge
+Comment=Gerar macros FreeCAD a partir de prompts com RAG local
+Exec=sh -lc 'cd "${FREECAD_PROMPT_FORGE_DIR:-$HOME/freecad_prompt_forge}" && ./run.sh'
+Terminal=false
+Categories=Graphics;Engineering;Development;
